@@ -32,31 +32,76 @@ pipeline {
 			}
 		}
 
-		stage('Android build (release)') {
+		stage('Android Release Build + Upload') {
+			agent {
+				label 'android'
+			} // or any node with JDK+SDK
 			environment {
-				// These are Jenkins credentials IDs you create in “Manage Credentials”
-				KEYSTORE_ID = 'android_keystore_file' // secret file
+				GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
+				KEYSTORE_ID = 'android_keystore_file'
 				KEYSTORE_PASSWORD = credentials('android_keystore_password')
 				KEY_ALIAS = credentials('android_key_alias')
 				KEY_PASSWORD = credentials('android_key_password')
 			}
 			steps {
 				dir('android') {
-					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
+					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH'),
+						file(credentialsId: 'play_service_json', variable: 'PLAY_JSON_PATH')]) {
 						sh '''
-              # Place keystore where gradle.properties expects it
-              cp "$KEYSTORE_PATH" app/app-upload.keystore
-
-              # Optional: warm caches (no-op if already cached on the node)
-              mkdir -p $HOME/.gradle/caches
-              mkdir -p $HOME/.cache/yarn
-
-              ./gradlew clean :app:assembleRelease -x lint -x test
-            '''
+          cp "$KEYSTORE_PATH" app/app-upload.keystore
+          export PLAY_SERVICE_JSON="$PLAY_JSON_PATH"
+          ./gradlew clean :app:bundleRelease :app:publishRelease --no-daemon
+        '''
 					}
 				}
 			}
+			post {
+				success {
+					archiveArtifacts artifacts: 'android/app/build/outputs/**/*.aab', fingerprint: true
+				}
+			}
 		}
+
+		stage('iOS Archive + Upload') {
+			agent {
+				label 'mac'
+			}
+			environment {
+				SCHEME = 'YourApp'             // <-- set your scheme
+				WORKSPACE = 'YourApp.xcworkspace'
+			}
+			steps {
+				dir('ios') {
+					sh '''
+        gem install bundler --no-document || true
+        bundle install || true
+        bundle exec pod install --repo-update
+        xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
+          -archivePath build/YourApp.xcarchive clean archive \
+          | xcpretty || true
+        xcodebuild -exportArchive \
+          -archivePath build/YourApp.xcarchive \
+          -exportOptionsPlist exportOptions.plist \
+          -exportPath build \
+          | xcpretty || true
+      '''
+					// Upload via Transporter using Apple ID app-specific password
+					withCredentials([string(credentialsId: 'ASC_USER', variable: 'ASC_USER'),
+						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')]) {
+						sh '''
+          xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
+            -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
+        '''
+					}
+				}
+			}
+			post {
+				success {
+					archiveArtifacts artifacts: 'ios/build/**/*.ipa', fingerprint: true
+				}
+			}
+		}
+
 	}
 
 	post {
