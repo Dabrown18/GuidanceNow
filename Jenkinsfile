@@ -15,7 +15,7 @@ pipeline {
 
 	options {
 		timestamps()
-		ansiColor('xterm')
+		// ansiColor('xterm')  // removed: plugin not installed
 	}
 
 	stages {
@@ -35,10 +35,10 @@ pipeline {
 			}
 		}
 
-		stage('Android Release Build') {
+		stage('Android Release Build + Upload') {   // name kept to match console header
 			// removed: agent { label 'android' }  → inherits top-level `agent any`
 			environment {
-				GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
+				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
 				KEYSTORE_PASSWORD = credentials('android_keystore_password')
 				KEY_ALIAS         = credentials('android_key_alias')
@@ -46,10 +46,9 @@ pipeline {
 			}
 			steps {
 				dir('android') {
-					// NOTE: removed Play upload creds & task to avoid failures until configured
 					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
 						sh '''
-              set -e
+              set -xe
               chmod +x ./gradlew || true
               cp "$KEYSTORE_PATH" app/app-upload.keystore
 
@@ -72,9 +71,7 @@ pipeline {
 
 		stage('iOS Archive + Upload') {
 			// Skip iOS until you’re ready: run with RUN_IOS=true to enable
-			when {
-				expression { return env.RUN_IOS == 'true' }
-			}
+			when { expression { return env.RUN_IOS == 'true' } }
 			agent { label 'mac' }
 			environment {
 				WORKSPACE = 'GuidanceNow.xcworkspace'
