@@ -1,6 +1,11 @@
 pipeline {
 	agent { label 'built-in' }  // keep using the controller node
 
+	// Use managed Node.js from the NodeJS plugin (Configure: Manage Jenkins → Tools → NodeJS installations → name: node20)
+	tools {
+		nodejs 'node20'
+	}
+
 	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
 
@@ -23,26 +28,7 @@ pipeline {
 		stage('Node & Yarn install') {
 			steps {
 				sh '''
-#!/bin/bash -eo pipefail
 set -xe
-
-# Install/use Node via nvm for this build (works in non-interactive shells)
-export NVM_DIR="$HOME/.nvm"
-if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-fi
-. "$NVM_DIR/nvm.sh"
-
-# Keep nvm from modifying shell profiles in CI
-export PROFILE=/dev/null
-
-# Install and use Node 20 (LTS)
-nvm install 20
-nvm use 20
-
-# Sanity: confirm binaries on PATH
-which node || true
-which npm || true
 node --version
 npm --version
 
@@ -50,7 +36,6 @@ npm --version
 npm install -g yarn
 yarn --version
 
-# Install JS deps
 yarn install --frozen-lockfile
 '''
 			}
@@ -69,7 +54,6 @@ yarn install --frozen-lockfile
 				dir('android') {
 					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
 						sh '''
-#!/bin/bash -eo pipefail
 set -xe
 chmod +x ./gradlew || true
 
@@ -103,7 +87,6 @@ export KEY_ALIAS="$KEY_ALIAS"
 			steps {
 				dir('ios') {
 					sh '''
-#!/bin/bash -eo pipefail
 set -e
 gem install bundler --no-document || true
 bundle install || true
@@ -124,7 +107,6 @@ xcodebuild -exportArchive \
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-#!/bin/bash -eo pipefail
 xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
   -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
 '''
