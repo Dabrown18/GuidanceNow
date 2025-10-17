@@ -126,8 +126,8 @@ xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
 			archiveArtifacts artifacts: 'android/app/build/outputs/apk/release/*.apk', fingerprint: true
 		}
 		always {
-			// REQUIRED CHANGE: ensure junit runs inside a node context
-			node {
+			// REQUIRED CHANGE: add label to node so junit has a launcher
+			node('built-in') {
 				junit allowEmptyResults: true, testResults: 'android/**/build/test-results/**/*.xml'
 			}
 		}
