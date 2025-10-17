@@ -1,24 +1,20 @@
 pipeline {
 	agent { label 'built-in' }  // keep using the controller node
 
-	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
 
-	tools {
-		// NodeJS plugin tool name must match your Tools config ("node20")
-		nodejs 'node20'
-	}
+	/* REQUIRED CHANGE: remove the tools{} block so we don't hit the auto Tool Install stage
+	   tools {
+	     nodejs 'node20'
+	   }
+	*/
 
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
 		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
-		// ANDROID_HOME / PATH can be set globally later if needed
 	}
 
-	options {
-		timestamps()
-		// ansiColor('xterm') // leave off unless plugin installed
-	}
+	options { timestamps() }
 
 	stages {
 		stage('Checkout') {
@@ -27,22 +23,26 @@ pipeline {
 
 		stage('Node & Yarn install') {
 			steps {
-				sh '''
+				// REQUIRED CHANGE: use NodeJS plugin step with retry instead of top-level tools{}
+				retry(3) {
+					nodejs(nodeJSInstallationName: 'node20') {
+						sh '''
 set -xe
-# Node is provided by the NodeJS plugin via tools { nodejs 'node20' }
 node --version
 npm --version
 
-# yarn comes from the NodeJS tool's "Global npm packages" (yarn)
+# if Yarn wasn’t preinstalled by the tool config, install it once
+yarn --version || npm install -g yarn
 yarn --version
 
 yarn install --frozen-lockfile
 '''
+					}
+				}
 			}
 		}
 
 		stage('Android Release Build + Upload') {
-			// inherits top-level agent
 			environment {
 				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
@@ -126,7 +126,7 @@ xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
 			archiveArtifacts artifacts: 'android/app/build/outputs/apk/release/*.apk', fingerprint: true
 		}
 		always {
-			// REQUIRED CHANGE: add label to node so junit has a launcher
+			// keep this wrapped in a labeled node so junit has a launcher
 			node('built-in') {
 				junit allowEmptyResults: true, testResults: 'android/**/build/test-results/**/*.xml'
 			}
