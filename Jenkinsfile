@@ -1,13 +1,13 @@
 pipeline {
 	agent { label 'built-in' }  // keep using the controller node
 
-	// Use managed Node.js from the NodeJS plugin (Configure: Manage Jenkins → Tools → NodeJS installations → name: node20)
-	tools {
-		nodejs 'node20'
-	}
-
 	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
+
+	tools {
+		// NodeJS plugin tool name must match your Tools config ("node20")
+		nodejs 'node20'
+	}
 
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
@@ -29,11 +29,11 @@ pipeline {
 			steps {
 				sh '''
 set -xe
+# Node is provided by the NodeJS plugin via tools { nodejs 'node20' }
 node --version
 npm --version
 
-# Ensure yarn is available
-npm install -g yarn
+# yarn comes from the NodeJS tool's "Global npm packages" (yarn)
 yarn --version
 
 yarn install --frozen-lockfile
