@@ -1,42 +1,54 @@
 pipeline {
-	agent { label 'built-in' }
+	agent { label 'built-in' }  // keep using the controller node
 
 	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
 
 	environment {
-		// Tweak as needed; Jenkins node should already have sdkmanager installed.
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
 		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
-		// Example: if ANDROID_HOME not set globally:
-		// ANDROID_HOME = "/opt/android-sdk"
-		// PATH = "${env.ANDROID_HOME}/platform-tools:${env.ANDROID_HOME}/cmdline-tools/latest/bin:${env.PATH}"
+		// ANDROID_HOME / PATH can be set globally later if needed
 	}
 
 	options {
 		timestamps()
-		// ansiColor('xterm')  // removed: plugin not installed
+		// ansiColor('xterm') // leave off unless plugin installed
 	}
 
 	stages {
 		stage('Checkout') {
-			steps {
-				checkout scm
-			}
+			steps { checkout scm }
 		}
 
 		stage('Node & Yarn install') {
 			steps {
 				sh '''
-          node --version || true
-          yarn --version || npm i -g yarn
+          set -xe
+
+          # Install/use Node via nvm for this build
+          export NVM_DIR="$HOME/.nvm"
+          if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+          fi
+          . "$NVM_DIR/nvm.sh"
+
+          nvm install 20
+          nvm use 20
+
+          node --version
+          npm --version
+
+          # Ensure yarn is available
+          npm install -g yarn
+          yarn --version
+
           yarn install --frozen-lockfile
         '''
 			}
 		}
 
-		stage('Android Release Build + Upload') {   // name kept to match console header
-			// removed: agent { label 'android' }  → inherits top-level `agent any`
+		stage('Android Release Build + Upload') {
+			// inherits top-level agent
 			environment {
 				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
@@ -50,9 +62,11 @@ pipeline {
 						sh '''
               set -xe
               chmod +x ./gradlew || true
+
+              # Put keystore where build.gradle expects it
               cp "$KEYSTORE_PATH" app/app-upload.keystore
 
-              # If your build.gradle reads env vars, export them (harmless if unused):
+              # Pass signing via env (harmless if gradle.properties already set)
               export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
               export KEY_PASSWORD="$KEY_PASSWORD"
               export KEY_ALIAS="$KEY_ALIAS"
@@ -70,7 +84,6 @@ pipeline {
 		}
 
 		stage('iOS Archive + Upload') {
-			// Skip iOS until you’re ready: run with RUN_IOS=true to enable
 			when { expression { return env.RUN_IOS == 'true' } }
 			agent { label 'mac' }
 			environment {
@@ -100,7 +113,6 @@ pipeline {
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              # Transporter upload (leave as-is; only runs when RUN_IOS=true)
               xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
