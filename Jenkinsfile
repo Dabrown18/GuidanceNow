@@ -36,7 +36,7 @@ pipeline {
 		}
 
 		stage('Android Release Build') {
-			agent { label 'android' } // or any node with JDK+SDK
+			// removed: agent { label 'android' }  → inherits top-level `agent any`
 			environment {
 				GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
