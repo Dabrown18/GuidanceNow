@@ -23,27 +23,36 @@ pipeline {
 		stage('Node & Yarn install') {
 			steps {
 				sh '''
-          set -xe
+#!/bin/bash -eo pipefail
+set -xe
 
-          # Install/use Node via nvm for this build
-          export NVM_DIR="$HOME/.nvm"
-          if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-          fi
-          . "$NVM_DIR/nvm.sh"
+# Install/use Node via nvm for this build (works in non-interactive shells)
+export NVM_DIR="$HOME/.nvm"
+if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+fi
+. "$NVM_DIR/nvm.sh"
 
-          nvm install 20
-          nvm use 20
+# Keep nvm from modifying shell profiles in CI
+export PROFILE=/dev/null
 
-          node --version
-          npm --version
+# Install and use Node 20 (LTS)
+nvm install 20
+nvm use 20
 
-          # Ensure yarn is available
-          npm install -g yarn
-          yarn --version
+# Sanity: confirm binaries on PATH
+which node || true
+which npm || true
+node --version
+npm --version
 
-          yarn install --frozen-lockfile
-        '''
+# Ensure yarn is available
+npm install -g yarn
+yarn --version
+
+# Install JS deps
+yarn install --frozen-lockfile
+'''
 			}
 		}
 
@@ -60,19 +69,20 @@ pipeline {
 				dir('android') {
 					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
 						sh '''
-              set -xe
-              chmod +x ./gradlew || true
+#!/bin/bash -eo pipefail
+set -xe
+chmod +x ./gradlew || true
 
-              # Put keystore where build.gradle expects it
-              cp "$KEYSTORE_PATH" app/app-upload.keystore
+# Put keystore where build.gradle expects it
+cp "$KEYSTORE_PATH" app/app-upload.keystore
 
-              # Pass signing via env (harmless if gradle.properties already set)
-              export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
-              export KEY_PASSWORD="$KEY_PASSWORD"
-              export KEY_ALIAS="$KEY_ALIAS"
+# Pass signing via env (harmless if gradle.properties already set)
+export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+export KEY_PASSWORD="$KEY_PASSWORD"
+export KEY_ALIAS="$KEY_ALIAS"
 
-              ./gradlew clean :app:bundleRelease --no-daemon
-            '''
+./gradlew clean :app:bundleRelease --no-daemon
+'''
 					}
 				}
 			}
@@ -93,29 +103,31 @@ pipeline {
 			steps {
 				dir('ios') {
 					sh '''
-            set -e
-            gem install bundler --no-document || true
-            bundle install || true
-            bundle exec pod install --repo-update
+#!/bin/bash -eo pipefail
+set -e
+gem install bundler --no-document || true
+bundle install || true
+bundle exec pod install --repo-update
 
-            xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
-              -archivePath build/YourApp.xcarchive clean archive \
-              | xcpretty || true
+xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
+  -archivePath build/YourApp.xcarchive clean archive \
+  | xcpretty || true
 
-            xcodebuild -exportArchive \
-              -archivePath build/YourApp.xcarchive \
-              -exportOptionsPlist exportOptions.plist \
-              -exportPath build \
-              | xcpretty || true
-          '''
+xcodebuild -exportArchive \
+  -archivePath build/YourApp.xcarchive \
+  -exportOptionsPlist exportOptions.plist \
+  -exportPath build \
+  | xcpretty || true
+'''
 					withCredentials([
 						string(credentialsId: 'ASC_USER',     variable: 'ASC_USER'),
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
-                -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
-            '''
+#!/bin/bash -eo pipefail
+xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
+  -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
+'''
 					}
 				}
 			}
