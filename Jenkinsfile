@@ -67,8 +67,8 @@ pipeline {
 				label 'mac'
 			}
 			environment {
-				SCHEME = 'YourApp'             // <-- set your scheme
-				WORKSPACE = 'YourApp.xcworkspace'
+				WORKSPACE = 'GuidanceNow.xcworkspace'
+				SCHEME = 'GuidanceNow'
 			}
 			steps {
 				dir('ios') {
