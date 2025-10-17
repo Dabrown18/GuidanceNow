@@ -1,5 +1,5 @@
 pipeline {
-	agent any
+	agent { label 'built-in' }
 
 	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
