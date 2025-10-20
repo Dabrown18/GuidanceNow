@@ -1,116 +1,157 @@
 pipeline {
-	agent none  // We'll run each stage on its own node label
+	agent any
 
-	triggers { githubPush() }
-
-	environment {
-		JAVA_TOOL_OPTIONS = "-Xmx3g"
-		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
+	// Make sure you have a NodeJS tool in "Manage Jenkins → Global Tool Configuration → NodeJS"
+	// with the name 'node20-20.19.5' or change the line below to match your tool name.
+	tools {
+		nodejs 'node20-20.19.5'
 	}
 
-	options { timestamps() }
+	options {
+		timestamps()
+		ansiColor('xterm')
+		buildDiscarder(logRotator(numToKeepStr: '20'))
+	}
+
+	environment {
+		// Adjust these paths for your Jenkins mac build node if needed
+		ANDROID_SDK_ROOT = "${env.HOME}/Library/Android/sdk"
+		JAVA_HOME        = "/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home"
+
+		// iOS vars, update if you use iOS builds here
+		IOS_WORKSPACE = "ios/GuidanceNow.xcworkspace"
+		IOS_SCHEME   = "GuidanceNow"
+		IOS_ARCHIVE  = "ios/build/GuidanceNow.xcarchive"
+		IOS_EXPORT   = "ios/build/export"
+	}
 
 	stages {
-
 		stage('Checkout') {
-			agent { label 'built-in' }
 			steps {
+				// Uses the SCM configured by the Multibranch/SCM job
 				checkout scm
+				sh 'git rev-parse --short HEAD || true'
 			}
 		}
 
 		stage('Node & Yarn install') {
-			agent { label 'built-in' }
 			steps {
-				retry(3) {
-					nodejs(nodeJSInstallationName: 'node20-20.19.5') {
-						sh '''
-set -xe
-node --version
-npm --version
+				// Verify Node tool is actually on PATH
+				sh '''
+          set -e
+          echo "Node version:"
+          node -v
+          echo "NPM version:"
+          npm -v
 
-yarn --version || npm install -g yarn
-yarn --version
+          echo "Enable Corepack and prepare Yarn"
+          corepack enable
+          corepack prepare yarn@stable --activate
 
-yarn install --frozen-lockfile
-'''
-					}
-				}
+          echo "Install JS deps"
+          yarn --version
+          yarn install --frozen-lockfile
+        '''
 			}
 		}
 
 		stage('Android Release Build') {
-			agent { label 'built-in' }
-			environment {
-				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
-				KEYSTORE_ID       = 'android_keystore_file'
-				KEYSTORE_PASSWORD = credentials('android_keystore_password')
-				KEY_ALIAS         = credentials('android_key_alias')
-				KEY_PASSWORD      = credentials('android_key_password')
-			}
 			steps {
-				dir('android') {
-					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
-						sh '''
-set -xe
-chmod +x ./gradlew || true
+				sh '''
+          set -e
+          echo "JAVA_HOME: $JAVA_HOME"
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
 
-cp "$KEYSTORE_PATH" app/app-upload.keystore
+          cd android
+          chmod +x ./gradlew
+          ./gradlew --version
 
-export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
-export KEY_PASSWORD="$KEY_PASSWORD"
-export KEY_ALIAS="$KEY_ALIAS"
+          echo "Cleaning..."
+          ./gradlew clean
 
-./gradlew clean :app:bundleRelease --no-daemon
-'''
-					}
-				}
+          echo "Assembling release (AAB)..."
+          ./gradlew bundleRelease
+
+          echo "Assembling release (APK, optional)..."
+          ./gradlew assembleRelease || true
+        '''
 			}
 			post {
-				success {
-					archiveArtifacts artifacts: 'android/app/build/outputs/**/*.aab', fingerprint: true
+				always {
+					script {
+						def aab = sh(script: "ls -1 android/app/build/outputs/bundle/release/*.aab 2>/dev/null | head -n1", returnStdout: true).trim()
+						def apk = sh(script: "ls -1 android/app/build/outputs/apk/release/*.apk 2>/dev/null | head -n1", returnStdout: true).trim()
+						if (aab) {
+							archiveArtifacts artifacts: 'android/app/build/outputs/bundle/release/*.aab', fingerprint: true
+						}
+						if (apk) {
+							archiveArtifacts artifacts: 'android/app/build/outputs/apk/release/*.apk', fingerprint: true
+						}
+					}
 				}
 			}
 		}
 
 		stage('iOS Archive + Upload') {
-			agent { label 'mac' }
-			environment {
-				WORKSPACE = 'GuidanceNow.xcworkspace'
-				SCHEME    = 'GuidanceNow'
+			when {
+				// Only attempt on mac agents that have Xcode, tweak as you like
+				expression { isUnix() && sh(script: "uname", returnStdout: true).trim() == 'Darwin' }
 			}
 			steps {
-				dir('ios') {
+				// If you use Fastlane, swap these xcodebuild commands for your lanes.
+				withEnv(["APP_STORE_CONNECT_API_KEY_JSON=${WORKSPACE}/ios/AuthKey.json"]) {
 					sh '''
-set -xe
-gem install bundler --no-document || true
-bundle install || true
-bundle exec pod install --repo-update
+            set -e
+            cd ios
 
-xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
-  -archivePath build/GuidanceNow.xcarchive clean archive \
-  | xcpretty || true
+            # If you’re using CocoaPods
+            if [ -f "Podfile" ]; then
+              echo "Installing CocoaPods"
+              which pod || sudo gem install cocoapods || true
+              pod install --repo-update
+            fi
 
-xcodebuild -exportArchive \
-  -archivePath build/GuidanceNow.xcarchive \
-  -exportOptionsPlist exportOptions.plist \
-  -exportPath build \
-  | xcpretty || true
-'''
-					withCredentials([
-						string(credentialsId: 'ASC_USER',     variable: 'ASC_USER'),
-						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
-					]) {
-						sh '''
-xcrun iTMSTransporter -m upload -assetFile build/GuidanceNow.ipa \
-  -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
-'''
-					}
+            echo "Xcode version:"
+            xcodebuild -version
+
+            echo "Archiving..."
+            xcodebuild \
+              -workspace "${IOS_WORKSPACE##ios/}" \
+              -scheme "${IOS_SCHEME}" \
+              -configuration Release \
+              -derivedDataPath build/DerivedData \
+              -archivePath "../${IOS_ARCHIVE##ios/}" \
+              clean archive
+
+            echo "Exporting IPA..."
+            mkdir -p "${IOS_EXPORT}"
+            cat > ExportOptions.plist <<'PLIST'
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>method</key><string>app-store</string>
+              <key>compileBitcode</key><false/>
+              <key>destination</key><string>export</string>
+              <key>manageAppVersionAndBuildNumber</key><true/>
+              <key>signingStyle</key><string>automatic</string>
+            </dict>
+            </plist>
+            PLIST
+
+            xcodebuild -exportArchive \
+              -archivePath "../${IOS_ARCHIVE##ios/}" \
+              -exportPath "${IOS_EXPORT}" \
+              -exportOptionsPlist ExportOptions.plist
+
+            echo "Generated IPA(s):"
+            ls -lah "${IOS_EXPORT}" || true
+          '''
 				}
 			}
 			post {
-				success {
-					archiveArtifacts artifacts: 'ios/build/**/*.ipa', fingerprint: true
+				always {
+					archiveArtifacts artifacts: 'ios/build/export/*.ipa, ios/build/*.xcarchive', fingerprint: true, onlyIfSuccessful: false
 				}
 			}
 		}
@@ -118,16 +159,14 @@ xcrun iTMSTransporter -m upload -assetFile build/GuidanceNow.ipa \
 
 	post {
 		success {
-			node('built-in') {
-				echo 'Build succeeded. Archiving APK/AAB and IPA outputs.'
-				archiveArtifacts artifacts: 'android/app/build/outputs/apk/release/*.apk', fingerprint: true
-				junit allowEmptyResults: true, testResults: 'android/**/build/test-results/**/*.xml'
-			}
+			echo 'Build completed successfully.'
 		}
 		failure {
-			node('built-in') {
-				echo 'Build failed. Please check logs.'
-			}
+			echo 'Build failed, please check logs.'
+		}
+		always {
+			// Keep useful logs and lockfiles for debugging
+			archiveArtifacts artifacts: 'yarn.lock, package.json, android/**/outputs/**, ios/build/**, **/*.log', fingerprint: true, onlyIfSuccessful: false
 		}
 	}
 }
