@@ -1,13 +1,7 @@
 pipeline {
-	agent { label 'built-in' }  // keep using the controller node
+	agent none  // We'll run each stage on its own node label
 
 	triggers { githubPush() }
-
-	/* REQUIRED CHANGE: remove the tools{} block so we don't hit the auto Tool Install stage
-	   tools {
-	     nodejs 'node20'
-	   }
-	*/
 
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
@@ -17,21 +11,24 @@ pipeline {
 	options { timestamps() }
 
 	stages {
+
 		stage('Checkout') {
-			steps { checkout scm }
+			agent { label 'built-in' }
+			steps {
+				checkout scm
+			}
 		}
 
 		stage('Node & Yarn install') {
+			agent { label 'built-in' }
 			steps {
-				// REQUIRED CHANGE: use NodeJS plugin step with retry instead of top-level tools{}
 				retry(3) {
-					nodejs(nodeJSInstallationName: 'node20') {
+					nodejs(nodeJSInstallationName: 'node20-20.19.5') {
 						sh '''
 set -xe
 node --version
 npm --version
 
-# if Yarn wasn’t preinstalled by the tool config, install it once
 yarn --version || npm install -g yarn
 yarn --version
 
@@ -42,7 +39,8 @@ yarn install --frozen-lockfile
 			}
 		}
 
-		stage('Android Release Build + Upload') {
+		stage('Android Release Build') {
+			agent { label 'built-in' }
 			environment {
 				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
@@ -57,10 +55,8 @@ yarn install --frozen-lockfile
 set -xe
 chmod +x ./gradlew || true
 
-# Put keystore where build.gradle expects it
 cp "$KEYSTORE_PATH" app/app-upload.keystore
 
-# Pass signing via env (harmless if gradle.properties already set)
 export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
 export KEY_PASSWORD="$KEY_PASSWORD"
 export KEY_ALIAS="$KEY_ALIAS"
@@ -78,7 +74,6 @@ export KEY_ALIAS="$KEY_ALIAS"
 		}
 
 		stage('iOS Archive + Upload') {
-			when { expression { return env.RUN_IOS == 'true' } }
 			agent { label 'mac' }
 			environment {
 				WORKSPACE = 'GuidanceNow.xcworkspace'
@@ -87,17 +82,17 @@ export KEY_ALIAS="$KEY_ALIAS"
 			steps {
 				dir('ios') {
 					sh '''
-set -e
+set -xe
 gem install bundler --no-document || true
 bundle install || true
 bundle exec pod install --repo-update
 
 xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
-  -archivePath build/YourApp.xcarchive clean archive \
+  -archivePath build/GuidanceNow.xcarchive clean archive \
   | xcpretty || true
 
 xcodebuild -exportArchive \
-  -archivePath build/YourApp.xcarchive \
+  -archivePath build/GuidanceNow.xcarchive \
   -exportOptionsPlist exportOptions.plist \
   -exportPath build \
   | xcpretty || true
@@ -107,7 +102,7 @@ xcodebuild -exportArchive \
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
+xcrun iTMSTransporter -m upload -assetFile build/GuidanceNow.ipa \
   -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
 '''
 					}
@@ -123,12 +118,15 @@ xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
 
 	post {
 		success {
-			archiveArtifacts artifacts: 'android/app/build/outputs/apk/release/*.apk', fingerprint: true
-		}
-		always {
-			// keep this wrapped in a labeled node so junit has a launcher
 			node('built-in') {
+				echo 'Build succeeded. Archiving APK/AAB and IPA outputs.'
+				archiveArtifacts artifacts: 'android/app/build/outputs/apk/release/*.apk', fingerprint: true
 				junit allowEmptyResults: true, testResults: 'android/**/build/test-results/**/*.xml'
+			}
+		}
+		failure {
+			node('built-in') {
+				echo 'Build failed. Please check logs.'
 			}
 		}
 	}
