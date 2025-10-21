@@ -7,7 +7,6 @@ pipeline {
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
 		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
-		// ANDROID_HOME / PATH can be set globally later if needed
 
 		// Android SDK location (matches your ~/.zshrc)
 		ANDROID_SDK_ROOT = "${env.HOME}/Library/Android/sdk"
@@ -26,7 +25,6 @@ pipeline {
 
 		stage('Node & Yarn install') {
 			steps {
-				// Use the configured NodeJS tool (Manage Jenkins → Global Tool Config)
 				tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'
 				withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
 					sh '''
@@ -48,7 +46,6 @@ pipeline {
 		}
 
 		stage('Android Release Build + Upload') {
-			// inherits top-level agent
 			environment {
 				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
@@ -63,18 +60,14 @@ pipeline {
               set -xe
               chmod +x ./gradlew || true
 
-              # Put keystore where build.gradle expects it
-              cp "$KEYSTORE_PATH" app/app-upload.keystore
-
-              # Pass signing via env (harmless if gradle.properties already set)
+              # Use the keystore directly from Jenkins credentials (no copy into repo)
               export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
               export KEY_PASSWORD="$KEY_PASSWORD"
               export KEY_ALIAS="$KEY_ALIAS"
+              export MYAPP_UPLOAD_STORE_FILE="$KEYSTORE_PATH"
 
-              # Ensure Gradle/SDK tools can be found (mirror your ~/.zshrc)
+              # Ensure SDK tools are in PATH and Gradle knows the SDK dir
               export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
-
-              # Ensure Gradle knows where the Android SDK is
               echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
               cat local.properties
 
