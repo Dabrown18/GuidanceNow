@@ -54,9 +54,8 @@ pipeline {
 				dir('android') {
 					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
 
-						// >>> ONLY REQUIRED CHANGE: ensure Node is on PATH during Gradle tasks <<<
-						def NODE_HOME = tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'
-						withEnv(["PATH+NODE=${NODE_HOME}/bin"]) {
+						// >>> REQUIRED CHANGE: inline tool() into withEnv; remove non-step `def` assignment <<<
+						withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
 
 							sh '''
                 set -xe
@@ -77,7 +76,7 @@ pipeline {
                 ./gradlew clean :app:bundleRelease --no-daemon
               '''
 						}
-						// <<< ONLY REQUIRED CHANGE ENDS >>>
+						// <<< REQUIRED CHANGE ENDS >>>
 					}
 				}
 			}
