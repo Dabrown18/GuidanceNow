@@ -4,20 +4,17 @@ pipeline {
 	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
 
-	tools {
-		// Use the NodeJS tool you actually have configured
-		nodejs 'node20'
-	}
+	// Use the NodeJS Plugin tool you configured as "node20"
+	tools { nodejs 'node20' }
 
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
-		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
-		// ANDROID_HOME / PATH can be set globally later if needed
+		GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
 	}
 
 	options {
 		timestamps()
-		// ansiColor('xterm') // removed: plugin not installed
+		// ansiColor('xterm') // leave off unless plugin installed
 	}
 
 	stages {
@@ -27,24 +24,20 @@ pipeline {
 
 		stage('Node & Yarn install') {
 			steps {
+				// Provides PATH to the NodeJS tool named above
 				nodejs(nodeJSInstallationName: 'node20') {
 					sh '''
             set -xe
-
             node --version
-            npm --version
+            npm  --version
 
-            # Ensure yarn is available (use npm to install Yarn 1.x if needed)
-            if ! command -v yarn >/dev/null 2>&1; then
-              npm install -g yarn
-            fi
-            yarn --version
-
-            # Prefer Yarn if you use yarn.lock; otherwise fall back to npm ci
-            if [ -f yarn.lock ]; then
-              yarn install --frozen-lockfile
-            else
+            # prefer npm ci if package-lock.json exists, else yarn
+            if [ -f package-lock.json ]; then
               npm ci
+            else
+              command -v yarn || npm install -g yarn
+              yarn --version
+              yarn install --frozen-lockfile
             fi
           '''
 				}
@@ -52,9 +45,7 @@ pipeline {
 		}
 
 		stage('Android Release Build + Upload') {
-			// inherits top-level agent
 			environment {
-				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
 				KEYSTORE_PASSWORD = credentials('android_keystore_password')
 				KEY_ALIAS         = credentials('android_key_alias')
@@ -67,13 +58,15 @@ pipeline {
               set -xe
               chmod +x ./gradlew || true
 
-              # Put keystore where build.gradle expects it
+              # Put keystore where Gradle expects it
               cp "$KEYSTORE_PATH" app/app-upload.keystore
 
-              # Pass signing via env (harmless if gradle.properties already set)
+              # === REQUIRED CHANGE ===
+              # Export env vars exactly as build.gradle reads them
               export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
               export KEY_PASSWORD="$KEY_PASSWORD"
               export KEY_ALIAS="$KEY_ALIAS"
+              export MYAPP_UPLOAD_STORE_FILE="app/app-upload.keystore"   # <— added
 
               ./gradlew clean :app:bundleRelease --no-daemon
             '''
@@ -103,11 +96,11 @@ pipeline {
             bundle exec pod install --repo-update
 
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
-              -archivePath build/YourApp.xcarchive clean archive \
+              -archivePath build/GuidanceNow.xcarchive clean archive \
               | xcpretty || true
 
             xcodebuild -exportArchive \
-              -archivePath build/YourApp.xcarchive \
+              -archivePath build/GuidanceNow.xcarchive \
               -exportOptionsPlist exportOptions.plist \
               -exportPath build \
               | xcpretty || true
@@ -117,7 +110,7 @@ pipeline {
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
+              xcrun iTMSTransporter -m upload -assetFile build/GuidanceNow.ipa \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
 					}
