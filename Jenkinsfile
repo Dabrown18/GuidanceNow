@@ -43,49 +43,53 @@ pipeline {
 		}
 
 		stage('Android Release Build + Upload') {
-			environment {
-				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
-				KEYSTORE_ID       = 'android_keystore_file'
-				KEYSTORE_PASSWORD = credentials('android_keystore_password')
-				KEY_ALIAS         = credentials('android_key_alias')
-				KEY_PASSWORD      = credentials('android_key_password')
-			}
+			when { expression { return isUnix() } }
 			steps {
-				dir('android') {
-					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
+				withCredentials([
+					string(credentialsId: 'android_keystore_password', variable: 'KEYSTORE_PASSWORD'),
+					string(credentialsId: 'android_key_password',    variable: 'KEY_PASSWORD'),
+					string(credentialsId: 'android_key_alias',       variable: 'KEY_ALIAS')
+				]) {
+					dir('android') {
+						withCredentials([file(credentialsId: 'android_keystore_file', variable: 'KEYSTORE_PATH')]) {
+							// Ensure Node & Android tools are on PATH if you set them earlier
+							withEnv([
+								"PATH=${env.ANDROID_HOME ?: '/Users/dbrown/Library/Android/sdk'}/emulator:${env.ANDROID_HOME ?: '/Users/dbrown/Library/Android/sdk'}/platform-tools:${env.PATH}",
+								"MYAPP_UPLOAD_STORE_FILE=app/app-upload.keystore"
+							]) {
+								sh '''
+              set -euo pipefail
 
-						// >>> REQUIRED CHANGE: inline tool() into withEnv; remove non-step `def` assignment <<<
-						withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
+              chmod +x ./gradlew
 
-							sh '''
-                set -xe
-                chmod +x ./gradlew || true
+              # 1) Clean out any stale keystore in the repo/workspace
+              rm -f app/app-upload.keystore
 
-                # Use the keystore directly from Jenkins credentials (no copy into repo)
-                export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
-                export KEY_PASSWORD="$KEY_PASSWORD"
-                export KEY_ALIAS="$KEY_ALIAS"
-                export MYAPP_UPLOAD_STORE_FILE="$KEYSTORE_PATH"
+              # 2) Copy the secret-file credential into place (overwrite)
+              install -m 600 "$KEYSTORE_PATH" app/app-upload.keystore
 
-                # Ensure SDK tools are in PATH and Gradle knows the SDK dir
-                export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
-                echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
-                cat local.properties
+              # 3) Create/overwrite local.properties so Gradle finds the SDK
+              echo "sdk.dir=/Users/dbrown/Library/Android/sdk" > local.properties
+              cat local.properties
 
-                # Now Gradle can find `node` for RN bundle task
-                ./gradlew clean :app:bundleRelease --no-daemon
-              '''
+              # 4) Sanity-check the keystore BEFORE building
+              #    This will fail fast if the secret values don’t match the file.
+              keytool -list -v \
+                -keystore app/app-upload.keystore -storetype JKS \
+                -storepass "$KEYSTORE_PASSWORD" \
+                -alias "$KEY_ALIAS" \
+                -keypass "$KEY_PASSWORD" >/dev/null
+
+              # 5) Build
+              ./gradlew clean :app:bundleRelease --no-daemon
+            '''
+							}
 						}
-						// <<< REQUIRED CHANGE ENDS >>>
 					}
 				}
 			}
-			post {
-				success {
-					archiveArtifacts artifacts: 'android/app/build/outputs/**/*.aab', fingerprint: true
-				}
-			}
 		}
+
 
 		stage('iOS Archive + Upload') {
 			when { expression { return env.RUN_IOS == 'true' } }
