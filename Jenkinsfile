@@ -1,7 +1,6 @@
 pipeline {
 	agent { label 'built-in' }  // keep using the controller node
 
-	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
 
 	environment {
@@ -15,7 +14,6 @@ pipeline {
 
 	options {
 		timestamps()
-		// ansiColor('xterm') // leave off unless plugin installed
 	}
 
 	stages {
@@ -34,7 +32,6 @@ pipeline {
             command -v yarn || npm install -g yarn
             yarn --version || true
 
-            # Prefer npm since you have package-lock.json
             if [ -f package-lock.json ]; then
               npm ci
             else
@@ -56,23 +53,31 @@ pipeline {
 			steps {
 				dir('android') {
 					withCredentials([file(credentialsId: "${env.KEYSTORE_ID}", variable: 'KEYSTORE_PATH')]) {
-						sh '''
-              set -xe
-              chmod +x ./gradlew || true
 
-              # Use the keystore directly from Jenkins credentials (no copy into repo)
-              export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
-              export KEY_PASSWORD="$KEY_PASSWORD"
-              export KEY_ALIAS="$KEY_ALIAS"
-              export MYAPP_UPLOAD_STORE_FILE="$KEYSTORE_PATH"
+						// >>> ONLY REQUIRED CHANGE: ensure Node is on PATH during Gradle tasks <<<
+						def NODE_HOME = tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'
+						withEnv(["PATH+NODE=${NODE_HOME}/bin"]) {
 
-              # Ensure SDK tools are in PATH and Gradle knows the SDK dir
-              export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
-              echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
-              cat local.properties
+							sh '''
+                set -xe
+                chmod +x ./gradlew || true
 
-              ./gradlew clean :app:bundleRelease --no-daemon
-            '''
+                # Use the keystore directly from Jenkins credentials (no copy into repo)
+                export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
+                export KEY_PASSWORD="$KEY_PASSWORD"
+                export KEY_ALIAS="$KEY_ALIAS"
+                export MYAPP_UPLOAD_STORE_FILE="$KEYSTORE_PATH"
+
+                # Ensure SDK tools are in PATH and Gradle knows the SDK dir
+                export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
+                echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+                cat local.properties
+
+                # Now Gradle can find `node` for RN bundle task
+                ./gradlew clean :app:bundleRelease --no-daemon
+              '''
+						}
+						// <<< ONLY REQUIRED CHANGE ENDS >>>
 					}
 				}
 			}
