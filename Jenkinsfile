@@ -4,12 +4,14 @@ pipeline {
 	// Build on every GitHub push (your webhook will trigger this)
 	triggers { githubPush() }
 
-	// Use the NodeJS Plugin tool you configured as "node20"
-	tools { nodejs 'node20' }
-
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
-		GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
+		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
+		// ANDROID_HOME / PATH can be set globally later if needed
+
+		// Android SDK location (matches your ~/.zshrc)
+		ANDROID_SDK_ROOT = "${env.HOME}/Library/Android/sdk"
+		ANDROID_HOME     = "${env.ANDROID_SDK_ROOT}"
 	}
 
 	options {
@@ -24,19 +26,20 @@ pipeline {
 
 		stage('Node & Yarn install') {
 			steps {
-				// Provides PATH to the NodeJS tool named above
-				nodejs(nodeJSInstallationName: 'node20') {
+				// Use the configured NodeJS tool (Manage Jenkins → Global Tool Config)
+				tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'
+				withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
 					sh '''
             set -xe
             node --version
-            npm  --version
+            npm --version
+            command -v yarn || npm install -g yarn
+            yarn --version || true
 
-            # prefer npm ci if package-lock.json exists, else yarn
+            # Prefer npm since you have package-lock.json
             if [ -f package-lock.json ]; then
               npm ci
             else
-              command -v yarn || npm install -g yarn
-              yarn --version
               yarn install --frozen-lockfile
             fi
           '''
@@ -45,7 +48,9 @@ pipeline {
 		}
 
 		stage('Android Release Build + Upload') {
+			// inherits top-level agent
 			environment {
+				GRADLE_OPTS       = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g'"
 				KEYSTORE_ID       = 'android_keystore_file'
 				KEYSTORE_PASSWORD = credentials('android_keystore_password')
 				KEY_ALIAS         = credentials('android_key_alias')
@@ -58,15 +63,20 @@ pipeline {
               set -xe
               chmod +x ./gradlew || true
 
-              # Put keystore where Gradle expects it
+              # Put keystore where build.gradle expects it
               cp "$KEYSTORE_PATH" app/app-upload.keystore
 
-              # === REQUIRED CHANGE ===
-              # Export env vars exactly as build.gradle reads them
+              # Pass signing via env (harmless if gradle.properties already set)
               export KEYSTORE_PASSWORD="$KEYSTORE_PASSWORD"
               export KEY_PASSWORD="$KEY_PASSWORD"
               export KEY_ALIAS="$KEY_ALIAS"
-              export MYAPP_UPLOAD_STORE_FILE="app/app-upload.keystore"   # <— added
+
+              # Ensure Gradle/SDK tools can be found (mirror your ~/.zshrc)
+              export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
+
+              # Ensure Gradle knows where the Android SDK is
+              echo "sdk.dir=${ANDROID_SDK_ROOT}" > local.properties
+              cat local.properties
 
               ./gradlew clean :app:bundleRelease --no-daemon
             '''
@@ -96,11 +106,11 @@ pipeline {
             bundle exec pod install --repo-update
 
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
-              -archivePath build/GuidanceNow.xcarchive clean archive \
+              -archivePath build/YourApp.xcarchive clean archive \
               | xcpretty || true
 
             xcodebuild -exportArchive \
-              -archivePath build/GuidanceNow.xcarchive \
+              -archivePath build/YourApp.xcarchive \
               -exportOptionsPlist exportOptions.plist \
               -exportPath build \
               | xcpretty || true
@@ -110,7 +120,7 @@ pipeline {
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              xcrun iTMSTransporter -m upload -assetFile build/GuidanceNow.ipa \
+              xcrun iTMSTransporter -m upload -assetFile build/YourApp.ipa \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
 					}
