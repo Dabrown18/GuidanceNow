@@ -1,20 +1,16 @@
 pipeline {
-	agent { label 'built-in' }  // keep using the controller node
+	agent { label 'built-in' }
 
 	triggers { githubPush() }
 
 	environment {
 		JAVA_TOOL_OPTIONS = "-Xmx3g"
 		GRADLE_OPTS = "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs='-Xmx3g -Dfile.encoding=UTF-8'"
-
-		// Android SDK location (matches your ~/.zshrc)
 		ANDROID_SDK_ROOT = "${env.HOME}/Library/Android/sdk"
 		ANDROID_HOME     = "${env.ANDROID_SDK_ROOT}"
 	}
 
-	options {
-		timestamps()
-	}
+	options { timestamps() }
 
 	stages {
 		stage('Checkout') {
@@ -23,7 +19,6 @@ pipeline {
 
 		stage('Node & Yarn install') {
 			steps {
-				// Ensure the NodeJS tool is provisioned for this job
 				tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'
 				withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
 					sh '''
@@ -53,8 +48,6 @@ pipeline {
 				]) {
 					dir('android') {
 						withCredentials([file(credentialsId: 'android_keystore_file', variable: 'KEYSTORE_PATH')]) {
-
-							// Put NodeJS + Android tools on PATH *for this Gradle run*
 							withEnv([
 								"PATH=${tool(name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation')}/bin:${env.ANDROID_HOME ?: '/Users/dbrown/Library/Android/sdk'}/emulator:${env.ANDROID_HOME ?: '/Users/dbrown/Library/Android/sdk'}/platform-tools:${env.PATH}",
 								"MYAPP_UPLOAD_STORE_FILE=app/app-upload.keystore"
@@ -63,23 +56,18 @@ pipeline {
                   set -euo pipefail
 
                   chmod +x ./gradlew
-
-                  # 1) Keystore into place (overwrite if exists)
                   rm -f app/app-upload.keystore
                   install -m 600 "$KEYSTORE_PATH" app/app-upload.keystore
 
-                  # 2) Ensure Gradle finds the SDK
                   echo "sdk.dir=${ANDROID_HOME:-/Users/dbrown/Library/Android/sdk}" > local.properties
                   cat local.properties
 
-                  # 3) Fail fast if signing inputs don’t match the keystore
                   keytool -list -v \
                     -keystore app/app-upload.keystore -storetype JKS \
                     -storepass "$KEYSTORE_PASSWORD" \
                     -alias "$KEY_ALIAS" \
                     -keypass "$KEY_PASSWORD" >/dev/null
 
-                  # 4) Build Android App Bundle
                   echo "Node in Gradle PATH: $(which node)"
                   node -v
                   npm -v
@@ -94,39 +82,67 @@ pipeline {
 		}
 
 		stage('iOS Archive + Upload') {
-			when { expression { return env.RUN_IOS == 'true' } }
-			agent { label 'mac' }
 			environment {
 				WORKSPACE = 'GuidanceNow.xcworkspace'
 				SCHEME    = 'GuidanceNow'
+				CONFIG    = 'Release'
+				ARCHIVE_PATH = 'build/GuidanceNow.xcarchive'
+				EXPORT_DIR   = 'build'
+				EXPORT_PLIST = 'exportOptions.plist'
 			}
 			steps {
 				dir('ios') {
 					sh '''
             set -e
+
+            which xcodebuild
+            xcodebuild -version
+            which pod || sudo gem install cocoapods --no-document || true
+
             gem install bundler --no-document || true
             bundle install || true
             bundle exec pod install --repo-update
 
-            # Archive
-            xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release \
-              -archivePath build/GuidanceNow.xcarchive clean archive \
-              | xcpretty || true
+            if [ ! -f "$EXPORT_PLIST" ]; then
+              cat > "$EXPORT_PLIST" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>ad-hoc</string>
+  <key>compileBitcode</key><false/>
+  <key>stripSwiftSymbols</key><true/>
+  <key>signingStyle</key><string>automatic</string>
+  <key>destination</key><string>export</string>
+  <key>manageAppVersionAndBuildNumber</key><true/>
+</dict>
+</plist>
+PLIST
+            fi
 
-            # Export IPA
+            xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
+              -archivePath "$ARCHIVE_PATH" \
+              clean archive | xcpretty || true
+
             xcodebuild -exportArchive \
-              -archivePath build/GuidanceNow.xcarchive \
-              -exportOptionsPlist exportOptions.plist \
-              -exportPath build \
-              | xcpretty || true
+              -archivePath "$ARCHIVE_PATH" \
+              -exportOptionsPlist "$EXPORT_PLIST" \
+              -exportPath "$EXPORT_DIR" | xcpretty || true
           '''
+
 					withCredentials([
 						string(credentialsId: 'ASC_USER',     variable: 'ASC_USER'),
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              # Upload to App Store Connect (replace YOUR_TEAM_ID if needed)
-              xcrun iTMSTransporter -m upload -assetFile build/GuidanceNow.ipa \
+              set -e
+              IPA_PATH=$(ls build/*.ipa | head -n 1 || true)
+              if [ -z "$IPA_PATH" ]; then
+                echo "No IPA found in build directory"
+                exit 1
+              fi
+
+              xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
 					}
@@ -142,7 +158,6 @@ pipeline {
 
 	post {
 		success {
-			// We produce an AAB in this pipeline
 			archiveArtifacts artifacts: 'android/app/build/outputs/bundle/release/*.aab', fingerprint: true
 		}
 		always {
