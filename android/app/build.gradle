@@ -3,34 +3,27 @@ apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 apply plugin: "com.github.triplet.play" // for Play uploads
 
-/**
- * This is the configuration block to customize your React Native Android app.
- * By default you don't need to apply any configuration, just uncomment the lines you need.
- */
 react {
-    /* Autolinking */
     autolinkLibrariesWithApp()
 }
 
-/**
- * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
- */
 def enableProguardInReleaseBuilds = false
 
-/**
- * The preferred build flavor of JavaScriptCore (JSC)
- */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
-/* ---------- Signing values (avoid name collision with DSL) ---------- */
 def KS_PASSWORD    = System.getenv("KEYSTORE_PASSWORD") ?: (project.hasProperty("MYAPP_UPLOAD_STORE_PASSWORD") ? MYAPP_UPLOAD_STORE_PASSWORD : "")
 def KEY_PASSWORD   = System.getenv("KEY_PASSWORD")       ?: (project.hasProperty("MYAPP_UPLOAD_KEY_PASSWORD") ? MYAPP_UPLOAD_KEY_PASSWORD : "")
 def KEY_ALIAS_VAL  = System.getenv("KEY_ALIAS")          ?: (project.hasProperty("MYAPP_UPLOAD_KEY_ALIAS")     ? MYAPP_UPLOAD_KEY_ALIAS     : "")
+
 def STORE_FILEPATH = (
     project.hasProperty("MYAPP_UPLOAD_STORE_FILE") &&
     MYAPP_UPLOAD_STORE_FILE != null &&
     MYAPP_UPLOAD_STORE_FILE.toString().trim()
 ) ? MYAPP_UPLOAD_STORE_FILE : "app-upload.keystore"
+
+def STORE_TYPE = (System.getenv("KEYSTORE_TYPE") ?: "PKCS12").toString().trim()
+
+def EFFECTIVE_KEY_PASSWORD = (STORE_TYPE.equalsIgnoreCase("PKCS12")) ? KS_PASSWORD : KEY_PASSWORD
 
 android {
     ndkVersion rootProject.ext.ndkVersion
@@ -38,6 +31,7 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     namespace "com.guidancenow"
+
     defaultConfig {
         applicationId "com.guidancenow"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -45,6 +39,7 @@ android {
         versionCode 1
         versionName "1.0"
     }
+
     signingConfigs {
         debug {
             storeFile file('debug.keystore')
@@ -56,9 +51,11 @@ android {
             storeFile file(STORE_FILEPATH)
             storePassword KS_PASSWORD
             keyAlias KEY_ALIAS_VAL
-            keyPassword KEY_PASSWORD
+            keyPassword EFFECTIVE_KEY_PASSWORD
+            storeType STORE_TYPE
         }
     }
+
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
@@ -72,7 +69,6 @@ android {
 }
 
 dependencies {
-    // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
     if (hermesEnabled.toBoolean()) {
@@ -82,8 +78,6 @@ dependencies {
     }
 }
 
-/* ---------- Play Publisher config ---------- */
-/* Only set credentials when PLAY_SERVICE_JSON is defined; avoids file("") locally. */
 def PLAY_JSON = System.getenv("PLAY_SERVICE_JSON")
 play {
     if (PLAY_JSON && PLAY_JSON.trim()) {
