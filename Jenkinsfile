@@ -82,107 +82,110 @@ pipeline {
 		}
 
 		stage('iOS Archive + Upload') {
-			environment {
-				WORKSPACE    = 'GuidanceNow.xcworkspace'
-				SCHEME       = 'GuidanceNow'
-				CONFIG       = 'Release'
-				ARCHIVE_PATH = 'build/GuidanceNow.xcarchive'
-				EXPORT_DIR   = 'build'
-				EXPORT_PLIST = 'exportOptions.plist'
-			}
 			steps {
-				dir('ios') {
-					// Ensure Node is on PATH for Podfile's `node` calls
-					withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
+				// Ensure Node (for Podfile's `node` calls) and user gems are on PATH
+				withEnv([
+					"PATH=${env.HOME}/.gem/bin:${tool(name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation')}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+					"GEM_HOME=${env.HOME}/.gem",
+					"GEM_PATH=${env.HOME}/.gem",
+					"LANG=en_US.UTF-8",
+					"LC_ALL=en_US.UTF-8"
+				]) {
+					dir('ios') {
 						sh '''
               set -euo pipefail
-              export LANG=en_US.UTF-8
-              export LC_ALL=en_US.UTF-8
 
               echo "Xcode:"
               which xcodebuild
               xcodebuild -version || true
 
-              echo "Node on PATH for CocoaPods:"
-              which node || true
-              node -v || true
-              npm -v || true
-
               echo "Ruby & Gem:"
-              ruby -v
-              gem -v
+              ruby -v || true
+              gem -v  || true
+              echo "Node: $(which node || true) $(node -v || true)"
 
-              # Install gems to the user dir and expose their bin/ on PATH
-              export GEM_HOME="$HOME/.gem"
-              export GEM_PATH="$GEM_HOME"
-              export PATH="$GEM_HOME/bin:$PATH"
-
-              # Read Bundler version from Gemfile.lock if present; otherwise use one compatible with Ruby 2.6
-              LOCK_BUNDLER="$(ruby -e 'begin; f="Gemfile.lock"; m=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)); puts(m ? m[1] : ""); rescue; puts ""; end')"
-              if [ -z "$LOCK_BUNDLER" ]; then
-                BUNDLER_VER="2.4.22"   # 2.5+ requires Ruby >= 3.0
-              else
-                BUNDLER_VER="$LOCK_BUNDLER"
+              # --- Bundler in user space (no /Library writes) ---
+              BUNDLER_VER=2.4.22
+              if ! gem list -i bundler -v "${BUNDLER_VER}" >/dev/null 2>&1; then
+                gem install --user-install bundler:"${BUNDLER_VER}" --no-document
+                hash -r || true
               fi
-              echo "Using Bundler ${BUNDLER_VER}"
 
-              # Use Bundler already available (installed in previous runs) via GEM_HOME bin
-              hash -r
-
-              # Install gems into project-local vendor/bundle and run Pods via Bundler
+              # Install gems into project-local vendor/bundle
               bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
               bundle _${BUNDLER_VER}_ install --jobs=4
 
-              # CocoaPods via Bundler (so we don't rely on PATH to find 'pod')
+              # CocoaPods (from Gemfile if present)
               bundle _${BUNDLER_VER}_ exec pod install --repo-update
 
-              # Ensure exportOptions.plist exists
+              # --- Build settings ---
+              WORKSPACE="GuidanceNow.xcworkspace"
+              SCHEME="GuidanceNow"
+              CONFIG="Release"
+              ARCHIVE_PATH="$(pwd)/build/GuidanceNow.xcarchive"
+              EXPORT_DIR="$(pwd)/build"
+              EXPORT_PLIST="$(pwd)/exportOptions.plist"
+
+              # Create exportOptions if missing (defaults for App Store build)
               if [ ! -f "$EXPORT_PLIST" ]; then
                 cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>method</key><string>ad-hoc</string>
+  <key>method</key><string>app-store</string>
   <key>compileBitcode</key><false/>
   <key>stripSwiftSymbols</key><true/>
   <key>signingStyle</key><string>automatic</string>
   <key>destination</key><string>export</string>
-  <key>manageAppVersionAndBuildNumber</key><true/>
+  <key>uploadSymbols</key><true/>
 </dict>
 </plist>
 PLIST
               fi
 
-              # Archive
+              # --- Archive ---
               xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
                 -archivePath "$ARCHIVE_PATH" \
-                clean archive
+                -allowProvisioningUpdates \
+                clean archive | tee xcodebuild-archive.log | grep -E "error:|warning:" -n || true
 
-              # Export IPA
+              # Verify archive exists
+              [ -d "$ARCHIVE_PATH" ] || { echo "Archive not created"; exit 1; }
+
+              # --- Export IPA ---
               xcodebuild -exportArchive \
                 -archivePath "$ARCHIVE_PATH" \
                 -exportOptionsPlist "$EXPORT_PLIST" \
-                -exportPath "$EXPORT_DIR"
-            '''
-					}
+                -exportPath "$EXPORT_DIR" | tee xcodebuild-export.log | grep -E "error:|warning:" -n || true
 
-					withCredentials([
-						string(credentialsId: 'ASC_USER',     variable: 'ASC_USER'),
-						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
-					]) {
-						sh '''
-              set -euo pipefail
-              IPA_PATH=$(ls build/*.ipa | head -n 1 || true)
+              IPA_PATH=$(ls "$EXPORT_DIR"/*.ipa | head -n 1 || true)
               if [ -z "$IPA_PATH" ]; then
-                echo "No IPA found in build directory"; exit 1
+                echo "No IPA found in $EXPORT_DIR"; exit 1
               fi
+              echo "Exported IPA: $IPA_PATH"
 
-              xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
-                -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
+              # Optional: upload via Transporter if ASC creds are present (username/password flow)
+              if [ -n "${ASC_USER:-}" ] && [ -n "${ASC_PASSWORD:-}" ] && [ -n "${ITC_PROVIDER:-}" ]; then
+                xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
+                  -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider "$ITC_PROVIDER" -verbose
+              else
+                echo "Skipping App Store upload (ASC_USER/ASC_PASSWORD/ITC_PROVIDER not set)."
+              fi
             '''
 					}
+
+					// Archive the IPA as a Jenkins artifact
+					sh 'ls -la ios/build || true'
 				}
+			}
+			environment {
+				// If you want automatic upload via username/password,
+				// create Jenkins String credentials and map them here:
+				ASC_USER     = credentials('ASC_USER')
+				ASC_PASSWORD = credentials('ASC_PASSWORD')
+				// Team short name / provider (set in Jenkins as a String credential)
+				ITC_PROVIDER = credentials('ITC_PROVIDER')
 			}
 			post {
 				success {
