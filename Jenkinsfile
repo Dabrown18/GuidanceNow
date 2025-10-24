@@ -89,41 +89,40 @@ pipeline {
 				ARCHIVE_PATH = 'build/GuidanceNow.xcarchive'
 				EXPORT_DIR   = 'build'
 				EXPORT_PLIST = 'exportOptions.plist'
-				RUBY_VERSION = '3.3.4'   // adjust if you want another rbenv Ruby
+				RUBY_VERSION = '3.3.4'
 			}
 			steps {
 				dir('ios') {
-					// Use bash so rbenv init works in non-login shells
-					sh(script: '''
+					sh '''
+            #!/bin/bash
             set -euo pipefail
             export LANG=en_US.UTF-8
             export LC_ALL=en_US.UTF-8
 
-            # ---- rbenv bootstrap (no Jenkins plugin) ----
+            # ---- rbenv bootstrap ----
             export RBENV_ROOT="${RBENV_ROOT:-$HOME/.rbenv}"
             export PATH="$RBENV_ROOT/bin:$PATH"
             if command -v rbenv >/dev/null 2>&1; then
               eval "$(rbenv init - bash)" || eval "$(rbenv init -)"
             else
-              echo "rbenv not found at $RBENV_ROOT/bin. Install rbenv on this node."; exit 1
+              echo "rbenv not found at $RBENV_ROOT/bin. Install rbenv on this node."
+              exit 1
             fi
 
-            # Ensure Ruby is present; -s = skip if already installed
+            # Ensure Ruby version
             rbenv install -s "${RUBY_VERSION}"
             rbenv shell   "${RUBY_VERSION}"
 
             echo "Using Ruby: $(ruby -v)"
             echo "Gem:        $(gem -v)"
 
-            # ---- Bundler & CocoaPods (local only; no sudo) ----
+            # Bundler + Pods
             BUNDLER_VER="$(ruby -e 'f=\"Gemfile.lock\"; v=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)) rescue nil; puts(v ? v[1] : \"2.5.11\")')"
             gem list -i bundler -v "$BUNDLER_VER" >/dev/null 2>&1 || gem install bundler:"$BUNDLER_VER" --no-document
 
-            # vendor gems into repo so we never touch system dirs
             bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
             bundle _${BUNDLER_VER}_ install --jobs=4
 
-            # Use pods from Gemfile if present; otherwise install pod gem locally and call it
             if grep -qi cocoapods Gemfile 2>/dev/null; then
               bundle _${BUNDLER_VER}_ exec pod install --repo-update
             else
@@ -131,7 +130,7 @@ pipeline {
               pod install --repo-update
             fi
 
-            # ---- exportOptions.plist (ad-hoc by default) ----
+            # Export options
             if [ ! -f "$EXPORT_PLIST" ]; then
               cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -149,31 +148,34 @@ pipeline {
 PLIST
             fi
 
-            # ---- Build & Export ----
+            # Build
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
               -archivePath "$ARCHIVE_PATH" clean archive \
               | tee xcodebuild-archive.log | grep -E "error:|warning:" -n || true
 
+            # Export
             xcodebuild -exportArchive \
               -archivePath "$ARCHIVE_PATH" \
               -exportOptionsPlist "$EXPORT_PLIST" \
               -exportPath "$EXPORT_DIR" \
               | tee xcodebuild-export.log | grep -E "error:|warning:" -n || true
-          ''', shell: '/bin/bash')
+          '''
 
 					withCredentials([
 						string(credentialsId: 'ASC_USER',     variable: 'ASC_USER'),
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
-						sh(script: '''
+						sh '''
+              #!/bin/bash
               set -euo pipefail
               IPA_PATH=$(ls build/*.ipa 2>/dev/null | head -n 1 || true)
               if [ -z "$IPA_PATH" ]; then
-                echo "No IPA found in build directory"; exit 1
+                echo "No IPA found in build directory"
+                exit 1
               fi
               xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
-            ''', shell: '/bin/bash')
+            '''
 					}
 				}
 			}
