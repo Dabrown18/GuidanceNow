@@ -89,74 +89,49 @@ pipeline {
 				ARCHIVE_PATH = 'build/GuidanceNow.xcarchive'
 				EXPORT_DIR   = 'build'
 				EXPORT_PLIST = 'exportOptions.plist'
-				RUBY_VERSION = '3.3.4' // used if rbenv is present
 			}
 			steps {
 				dir('ios') {
 					sh '''
-            #!/bin/bash
             set -euo pipefail
             export LANG=en_US.UTF-8
             export LC_ALL=en_US.UTF-8
 
-            # Prefer rbenv if present, otherwise use system Ruby
-            if command -v rbenv >/dev/null 2>&1; then
-              echo "rbenv found: $(command -v rbenv)"
-              eval "$(rbenv init - bash)" || eval "$(rbenv init -)" || true
-              rbenv install -s "${RUBY_VERSION}"
-              rbenv shell   "${RUBY_VERSION}"
+            echo "Xcode:"
+            which xcodebuild
+            xcodebuild -version || true
+
+            echo "Ruby & Gem:"
+            ruby -v || true
+            gem -v || true
+
+            # Pick a Bundler version compatible with system Ruby 2.6 (lockfile wins if present)
+            LOCK_BUNDLER="$(ruby -e 'f=\"Gemfile.lock\"; puts(/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f))[1] rescue \"\")')"
+            if [ -n "$LOCK_BUNDLER" ]; then
+              BUNDLER_VER="$LOCK_BUNDLER"
             else
-              echo "rbenv not found — using system Ruby."
+              BUNDLER_VER="2.4.22"
             fi
+            echo "Using Bundler $BUNDLER_VER"
+            gem list -i bundler -v "$BUNDLER_VER" >/dev/null || gem install bundler:"$BUNDLER_VER" --no-document
 
-            echo "Ruby: $(ruby -v || echo 'missing ruby')"
-            echo "Gem:  $(gem -v   || echo 'missing rubygems')"
-
-            # Install to user gem dir (no sudo needed)
-            export GEM_HOME="$HOME/.gem"
-            export PATH="$GEM_HOME/bin:$PATH"
-
-            # Choose a Bundler version compatible with the current Ruby
-            # Ruby < 3.0 → use Bundler 2.4.x; Ruby >= 3.0 → use Bundler 2.5.x (or Gemfile.lock value)
-            RUBY_MAJOR=$(ruby -e 'v=RUBY_VERSION.split(".").map(&:to_i); puts v[0]' 2>/dev/null || echo 0)
-            RUBY_MINOR=$(ruby -e 'v=RUBY_VERSION.split(".").map(&:to_i); puts v[1]' 2>/dev/null || echo 0)
-
-            # Try to read "BUNDLED WITH" from Gemfile.lock
-            LOCK_BUNDLER=$(ruby -e 'f="Gemfile.lock"; puts(/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f))[1] rescue "")' 2>/dev/null || true)
-
-            if [ "$RUBY_MAJOR" -lt 3 ]; then
-              # Force a Bundler compatible with Ruby 2.6/2.7
-              BUNDLER_VER="${LOCK_BUNDLER:-2.4.22}"
-              echo "Using Bundler $BUNDLER_VER for Ruby ${RUBY_MAJOR}.${RUBY_MINOR}"
-            else
-              BUNDLER_VER="${LOCK_BUNDLER:-2.5.11}"
-              echo "Using Bundler $BUNDLER_VER for Ruby ${RUBY_MAJOR}.${RUBY_MINOR}"
-            fi
-
-            gem list -i bundler -v "$BUNDLER_VER" >/dev/null 2>&1 || gem install bundler:"$BUNDLER_VER" --no-document
-
-            # Try bundle install; if it fails (e.g. due to lockfile version), fall back to direct Cocoapods install
+            # Install gems into vendor/bundle (project-local)
             set +e
             bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
             bundle _${BUNDLER_VER}_ install --jobs=4
-            BUNDLE_RC=$?
+            RC=$?
             set -e
-
-            if [ $BUNDLE_RC -ne 0 ]; then
-              echo "bundle install failed; falling back to installing cocoapods directly"
-              gem list -i cocoapods >/dev/null 2>&1 || gem install cocoapods --no-document
-              pod install --repo-update
-            else
-              echo "bundle install succeeded"
-              if grep -qi cocoapods Gemfile 2>/dev/null; then
-                bundle _${BUNDLER_VER}_ exec pod install --repo-update
-              else
-                gem list -i cocoapods >/dev/null 2>&1 || gem install cocoapods --no-document
-                pod install --repo-update
-              fi
+            if [ "$RC" -ne 0 ]; then
+              echo "bundle install failed with Bundler ${BUNDLER_VER}"
+              exit $RC
             fi
 
-            # Ensure exportOptions.plist exists
+            # CocoaPods via Bundler path
+            echo "Running pod install via Bundler…"
+            bundle _${BUNDLER_VER}_ exec pod --version
+            bundle _${BUNDLER_VER}_ exec pod install --repo-update
+
+            # Ensure exportOptions.plist exists (adjust method as needed)
             if [ ! -f "$EXPORT_PLIST" ]; then
               cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -174,17 +149,16 @@ pipeline {
 PLIST
             fi
 
-            # Archive
+            echo "Archiving…"
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
-              -archivePath "$ARCHIVE_PATH" clean archive \
-              | tee xcodebuild-archive.log | grep -E "error:|warning:" -n || true
+              -archivePath "$ARCHIVE_PATH" \
+              clean archive | tee xcodebuild-archive.log
 
-            # Export
+            echo "Exporting IPA…"
             xcodebuild -exportArchive \
               -archivePath "$ARCHIVE_PATH" \
               -exportOptionsPlist "$EXPORT_PLIST" \
-              -exportPath "$EXPORT_DIR" \
-              | tee xcodebuild-export.log | grep -E "error:|warning:" -n || true
+              -exportPath "$EXPORT_DIR" | tee xcodebuild-export.log
           '''
 
 					withCredentials([
@@ -192,13 +166,13 @@ PLIST
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              #!/bin/bash
               set -euo pipefail
-              IPA_PATH=$(ls build/*.ipa 2>/dev/null | head -n 1 || true)
+              IPA_PATH=$(ls build/*.ipa | head -n 1 || true)
               if [ -z "$IPA_PATH" ]; then
                 echo "No IPA found in build directory"
                 exit 1
               fi
+              echo "Uploading $IPA_PATH to App Store Connect…"
               xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
