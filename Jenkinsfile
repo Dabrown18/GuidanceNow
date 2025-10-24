@@ -83,8 +83,8 @@ pipeline {
 
 		stage('iOS Archive + Upload') {
 			steps {
-				// Ensure Node (for Podfile's `node` calls) and user gems are on PATH
 				withEnv([
+					// Ensure Node is on PATH for Podfile `node` call; keep gems user-scoped
 					"PATH=${env.HOME}/.gem/bin:${tool(name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation')}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
 					"GEM_HOME=${env.HOME}/.gem",
 					"GEM_PATH=${env.HOME}/.gem",
@@ -95,6 +95,12 @@ pipeline {
 						sh '''
               set -euo pipefail
 
+              # Guard: if Xcode isn't present, skip politely
+              if ! command -v xcodebuild >/dev/null 2>&1; then
+                echo "xcodebuild not found on this agent — skipping iOS stage."
+                exit 0
+              fi
+
               echo "Xcode:"
               which xcodebuild
               xcodebuild -version || true
@@ -102,7 +108,9 @@ pipeline {
               echo "Ruby & Gem:"
               ruby -v || true
               gem -v  || true
-              echo "Node: $(which node || true) $(node -v || true)"
+
+              echo "Node in PATH for CocoaPods/Podfile: $(which node || true)"
+              node -v || true
 
               # --- Bundler in user space (no /Library writes) ---
               BUNDLER_VER=2.4.22
@@ -165,8 +173,9 @@ PLIST
               fi
               echo "Exported IPA: $IPA_PATH"
 
-              # Optional: upload via Transporter if ASC creds are present (username/password flow)
+              # --- Optional App Store upload ---
               if [ -n "${ASC_USER:-}" ] && [ -n "${ASC_PASSWORD:-}" ] && [ -n "${ITC_PROVIDER:-}" ]; then
+                echo "Uploading via iTMSTransporter with ITC_PROVIDER=$ITC_PROVIDER"
                 xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
                   -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider "$ITC_PROVIDER" -verbose
               else
@@ -175,29 +184,18 @@ PLIST
             '''
 					}
 
-					// Archive the IPA as a Jenkins artifact
+					// Show where the IPA landed
 					sh 'ls -la ios/build || true'
 				}
 			}
-			environment {
-				// If you want automatic upload via username/password,
-				// create Jenkins String credentials and map them here:
-				ASC_USER     = credentials('ASC_USER')
-				ASC_PASSWORD = credentials('ASC_PASSWORD')
-				// Team short name / provider (set in Jenkins as a String credential)
-				ITC_PROVIDER = credentials('ITC_PROVIDER')
-			}
-			post {
-				success {
-					archiveArtifacts artifacts: 'ios/build/**/*.ipa', fingerprint: true
-				}
-			}
+			// No credentials() bindings here — avoids hard failure if they aren't configured
 		}
 	}
 
 	post {
 		success {
 			archiveArtifacts artifacts: 'android/app/build/outputs/bundle/release/*.aab', fingerprint: true
+			archiveArtifacts artifacts: 'ios/build/**/*.ipa', fingerprint: true
 		}
 		always {
 			junit allowEmptyResults: true, testResults: 'android/**/build/test-results/**/*.xml'
