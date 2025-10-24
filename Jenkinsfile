@@ -83,9 +83,9 @@ pipeline {
 
 		stage('iOS Archive + Upload') {
 			environment {
-				WORKSPACE = 'GuidanceNow.xcworkspace'
-				SCHEME    = 'GuidanceNow'
-				CONFIG    = 'Release'
+				WORKSPACE    = 'GuidanceNow.xcworkspace'
+				SCHEME       = 'GuidanceNow'
+				CONFIG       = 'Release'
 				ARCHIVE_PATH = 'build/GuidanceNow.xcarchive'
 				EXPORT_DIR   = 'build'
 				EXPORT_PLIST = 'exportOptions.plist'
@@ -93,16 +93,36 @@ pipeline {
 			steps {
 				dir('ios') {
 					sh '''
-            set -e
+            set -euo pipefail
+            export LANG=en_US.UTF-8
+            export LC_ALL=en_US.UTF-8
+
+            # Use user-local gem path (no sudo/system writes)
+            export GEM_HOME="$HOME/.gem"
+            export PATH="$GEM_HOME/bin:$PATH"
 
             which xcodebuild
-            xcodebuild -version
-            which pod || sudo gem install cocoapods --no-document || true
+            xcodebuild -version || true
+            ruby -v
+            gem -v
 
-            gem install bundler --no-document || true
-            bundle install || true
-            bundle exec pod install --repo-update
+            # Match Bundler to Gemfile.lock; fallback to 2.5.11 if not present
+            BUNDLER_VER="$(ruby -e 'f=\"Gemfile.lock\"; v=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)) rescue nil; puts(v ? v[1] : \"2.5.11\")')"
+            gem list -i bundler -v "$BUNDLER_VER" >/dev/null || gem install --user-install bundler:"$BUNDLER_VER" --no-document
 
+            # If CocoaPods isn't in Gemfile, install user-local
+            if ! grep -qi cocoapods Gemfile 2>/dev/null; then
+              gem list -i cocoapods >/dev/null || gem install --user-install cocoapods --no-document
+            fi
+
+            # Install gems into project-local vendor/bundle
+            bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
+            bundle _${BUNDLER_VER}_ install --jobs=4
+
+            # Pods
+            bundle _${BUNDLER_VER}_ exec pod install --repo-update
+
+            # Ensure exportOptions.plist exists (adjust method if needed)
             if [ ! -f "$EXPORT_PLIST" ]; then
               cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -120,14 +140,16 @@ pipeline {
 PLIST
             fi
 
+            # Archive
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
               -archivePath "$ARCHIVE_PATH" \
-              clean archive | xcpretty || true
+              clean archive | tee xcodebuild-archive.log | grep -E "error:|warning:" -n || true
 
+            # Export IPA
             xcodebuild -exportArchive \
               -archivePath "$ARCHIVE_PATH" \
               -exportOptionsPlist "$EXPORT_PLIST" \
-              -exportPath "$EXPORT_DIR" | xcpretty || true
+              -exportPath "$EXPORT_DIR" | tee xcodebuild-export.log | grep -E "error:|warning:" -n || true
           '''
 
 					withCredentials([
@@ -135,13 +157,11 @@ PLIST
 						string(credentialsId: 'ASC_PASSWORD', variable: 'ASC_PASSWORD')
 					]) {
 						sh '''
-              set -e
+              set -euo pipefail
               IPA_PATH=$(ls build/*.ipa | head -n 1 || true)
               if [ -z "$IPA_PATH" ]; then
-                echo "No IPA found in build directory"
-                exit 1
+                echo "No IPA found in build directory"; exit 1
               fi
-
               xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
