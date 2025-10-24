@@ -102,49 +102,37 @@ pipeline {
             xcodebuild -version || true
 
             echo "Ruby & Gem:"
-            ruby -v || true
-            gem -v || true
+            ruby -v
+            gem -v
 
-            # Read Bundler version from Gemfile.lock, safely on Ruby 2.6
-            LOCK_BUNDLER="$(ruby -e 'begin; f=\"Gemfile.lock\"; m=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)); puts(m ? m[1] : \"\"); rescue; puts \"\"; end' || true)"
+            # Always install gems to the user dir and expose their bin/ on PATH
+            export GEM_HOME="$HOME/.gem"
+            export GEM_PATH="$GEM_HOME"
+            export PATH="$GEM_HOME/bin:$PATH"
 
-            RUBY_MAJOR="$(ruby -e 'v=RUBY_VERSION.split(\".\").map(&:to_i); puts v[0]' )"
-            RUBY_MINOR="$(ruby -e 'v=RUBY_VERSION.split(\".\").map(&:to_i); puts v[1]' )"
-
-            # Default Bundler for Ruby 2.6; override with lockfile if compatible
-            BUNDLER_VER="$LOCK_BUNDLER"
-            if [ -z "$BUNDLER_VER" ]; then
-              BUNDLER_VER="2.4.22"
+            # Determine Bundler version: use Gemfile.lock if present, else pick one compatible with Ruby 2.6
+            LOCK_BUNDLER="$(ruby -e 'begin; f="Gemfile.lock"; m=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)); puts(m ? m[1] : ""); rescue; puts ""; end')"
+            if [ -z "$LOCK_BUNDLER" ]; then
+              BUNDLER_VER="2.4.22"   # 2.5+ requires Ruby >= 3.0
+            else
+              BUNDLER_VER="$LOCK_BUNDLER"
             fi
+            echo "Using Bundler ${BUNDLER_VER}"
 
-            # If we're on Ruby < 3 and lockfile asks for >= 2.5 (incompatible), force 2.4.22
-            if [ "$RUBY_MAJOR" -lt 3 ]; then
-              case "$BUNDLER_VER" in
-                2.5.*|2.6.*|2.7.*|3.*) BUNDLER_VER="2.4.22" ;;
-              esac
-            fi
+            # Install Bundler into $GEM_HOME (no sudo/system writes)
+            gem list -i bundler -v "$BUNDLER_VER" >/dev/null 2>&1 || \
+              gem install --user-install bundler:"$BUNDLER_VER" --no-document
 
-            echo "Using Bundler $BUNDLER_VER (Ruby ${RUBY_MAJOR}.${RUBY_MINOR})"
-            gem list -i bundler -v "$BUNDLER_VER" >/dev/null || gem install bundler:"$BUNDLER_VER" --no-document
+            hash -r
 
-            # Install gems into vendor/bundle (project-local)
-            set +e
+            # Install gems into project-local vendor/bundle and run Pods via Bundler
             bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
             bundle _${BUNDLER_VER}_ install --jobs=4
-            RC=$?
-            set -e
-            if [ "$RC" -ne 0 ]; then
-              echo "bundle install failed with Bundler ${BUNDLER_VER}"
-              exit $RC
-            fi
-            echo "bundle install succeeded"
 
-            # CocoaPods via Bundler (ensures 'pod' is on PATH)
-            echo "Running pod install via Bundler…"
-            bundle _${BUNDLER_VER}_ exec pod --version
+            # CocoaPods (through Bundler to avoid PATH issues)
             bundle _${BUNDLER_VER}_ exec pod install --repo-update
 
-            # Ensure exportOptions.plist exists (adjust method as needed)
+            # Ensure exportOptions.plist exists
             if [ ! -f "$EXPORT_PLIST" ]; then
               cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -162,16 +150,16 @@ pipeline {
 PLIST
             fi
 
-            echo "Archiving…"
+            # Archive
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
               -archivePath "$ARCHIVE_PATH" \
-              clean archive | tee xcodebuild-archive.log
+              clean archive
 
-            echo "Exporting IPA…"
+            # Export IPA
             xcodebuild -exportArchive \
               -archivePath "$ARCHIVE_PATH" \
               -exportOptionsPlist "$EXPORT_PLIST" \
-              -exportPath "$EXPORT_DIR" | tee xcodebuild-export.log
+              -exportPath "$EXPORT_DIR"
           '''
 
 					withCredentials([
@@ -182,10 +170,9 @@ PLIST
               set -euo pipefail
               IPA_PATH=$(ls build/*.ipa | head -n 1 || true)
               if [ -z "$IPA_PATH" ]; then
-                echo "No IPA found in build directory"
-                exit 1
+                echo "No IPA found in build directory"; exit 1
               fi
-              echo "Uploading $IPA_PATH to App Store Connect…"
+
               xcrun iTMSTransporter -m upload -assetFile "$IPA_PATH" \
                 -u "$ASC_USER" -p "$ASC_PASSWORD" -itc_provider YOUR_TEAM_ID
             '''
