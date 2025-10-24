@@ -89,7 +89,7 @@ pipeline {
 				ARCHIVE_PATH = 'build/GuidanceNow.xcarchive'
 				EXPORT_DIR   = 'build'
 				EXPORT_PLIST = 'exportOptions.plist'
-				RUBY_VERSION = '3.3.4'
+				RUBY_VERSION = '3.3.4' // used if rbenv is present
 			}
 			steps {
 				dir('ios') {
@@ -99,38 +99,64 @@ pipeline {
             export LANG=en_US.UTF-8
             export LC_ALL=en_US.UTF-8
 
-            # ---- rbenv bootstrap ----
-            export RBENV_ROOT="${RBENV_ROOT:-$HOME/.rbenv}"
-            export PATH="$RBENV_ROOT/bin:$PATH"
+            # Prefer rbenv if present, otherwise use system Ruby
             if command -v rbenv >/dev/null 2>&1; then
-              eval "$(rbenv init - bash)" || eval "$(rbenv init -)"
+              echo "rbenv found: $(command -v rbenv)"
+              eval "$(rbenv init - bash)" || eval "$(rbenv init -)" || true
+              rbenv install -s "${RUBY_VERSION}"
+              rbenv shell   "${RUBY_VERSION}"
             else
-              echo "rbenv not found at $RBENV_ROOT/bin. Install rbenv on this node."
-              exit 1
+              echo "rbenv not found — using system Ruby."
             fi
 
-            # Ensure Ruby version
-            rbenv install -s "${RUBY_VERSION}"
-            rbenv shell   "${RUBY_VERSION}"
+            echo "Ruby: $(ruby -v || echo 'missing ruby')"
+            echo "Gem:  $(gem -v   || echo 'missing rubygems')"
 
-            echo "Using Ruby: $(ruby -v)"
-            echo "Gem:        $(gem -v)"
+            # Install to user gem dir (no sudo needed)
+            export GEM_HOME="$HOME/.gem"
+            export PATH="$GEM_HOME/bin:$PATH"
 
-            # Bundler + Pods
-            BUNDLER_VER="$(ruby -e 'f=\"Gemfile.lock\"; v=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)) rescue nil; puts(v ? v[1] : \"2.5.11\")')"
+            # Choose a Bundler version compatible with the current Ruby
+            # Ruby < 3.0 → use Bundler 2.4.x; Ruby >= 3.0 → use Bundler 2.5.x (or Gemfile.lock value)
+            RUBY_MAJOR=$(ruby -e 'v=RUBY_VERSION.split(".").map(&:to_i); puts v[0]' 2>/dev/null || echo 0)
+            RUBY_MINOR=$(ruby -e 'v=RUBY_VERSION.split(".").map(&:to_i); puts v[1]' 2>/dev/null || echo 0)
+
+            # Try to read "BUNDLED WITH" from Gemfile.lock
+            LOCK_BUNDLER=$(ruby -e 'f="Gemfile.lock"; puts(/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f))[1] rescue "")' 2>/dev/null || true)
+
+            if [ "$RUBY_MAJOR" -lt 3 ]; then
+              # Force a Bundler compatible with Ruby 2.6/2.7
+              BUNDLER_VER="${LOCK_BUNDLER:-2.4.22}"
+              echo "Using Bundler $BUNDLER_VER for Ruby ${RUBY_MAJOR}.${RUBY_MINOR}"
+            else
+              BUNDLER_VER="${LOCK_BUNDLER:-2.5.11}"
+              echo "Using Bundler $BUNDLER_VER for Ruby ${RUBY_MAJOR}.${RUBY_MINOR}"
+            fi
+
             gem list -i bundler -v "$BUNDLER_VER" >/dev/null 2>&1 || gem install bundler:"$BUNDLER_VER" --no-document
 
+            # Try bundle install; if it fails (e.g. due to lockfile version), fall back to direct Cocoapods install
+            set +e
             bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
             bundle _${BUNDLER_VER}_ install --jobs=4
+            BUNDLE_RC=$?
+            set -e
 
-            if grep -qi cocoapods Gemfile 2>/dev/null; then
-              bundle _${BUNDLER_VER}_ exec pod install --repo-update
-            else
+            if [ $BUNDLE_RC -ne 0 ]; then
+              echo "bundle install failed; falling back to installing cocoapods directly"
               gem list -i cocoapods >/dev/null 2>&1 || gem install cocoapods --no-document
               pod install --repo-update
+            else
+              echo "bundle install succeeded"
+              if grep -qi cocoapods Gemfile 2>/dev/null; then
+                bundle _${BUNDLER_VER}_ exec pod install --repo-update
+              else
+                gem list -i cocoapods >/dev/null 2>&1 || gem install cocoapods --no-document
+                pod install --repo-update
+              fi
             fi
 
-            # Export options
+            # Ensure exportOptions.plist exists
             if [ ! -f "$EXPORT_PLIST" ]; then
               cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -148,7 +174,7 @@ pipeline {
 PLIST
             fi
 
-            # Build
+            # Archive
             xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
               -archivePath "$ARCHIVE_PATH" clean archive \
               | tee xcodebuild-archive.log | grep -E "error:|warning:" -n || true
