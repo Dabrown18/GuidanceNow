@@ -105,14 +105,26 @@ pipeline {
             ruby -v || true
             gem -v || true
 
-            # Pick a Bundler version compatible with system Ruby 2.6 (lockfile wins if present)
-            LOCK_BUNDLER="$(ruby -e 'f=\"Gemfile.lock\"; puts(/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f))[1] rescue \"\")')"
-            if [ -n "$LOCK_BUNDLER" ]; then
-              BUNDLER_VER="$LOCK_BUNDLER"
-            else
+            # Read Bundler version from Gemfile.lock, safely on Ruby 2.6
+            LOCK_BUNDLER="$(ruby -e 'begin; f=\"Gemfile.lock\"; m=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)); puts(m ? m[1] : \"\"); rescue; puts \"\"; end' || true)"
+
+            RUBY_MAJOR="$(ruby -e 'v=RUBY_VERSION.split(\".\").map(&:to_i); puts v[0]' )"
+            RUBY_MINOR="$(ruby -e 'v=RUBY_VERSION.split(\".\").map(&:to_i); puts v[1]' )"
+
+            # Default Bundler for Ruby 2.6; override with lockfile if compatible
+            BUNDLER_VER="$LOCK_BUNDLER"
+            if [ -z "$BUNDLER_VER" ]; then
               BUNDLER_VER="2.4.22"
             fi
-            echo "Using Bundler $BUNDLER_VER"
+
+            # If we're on Ruby < 3 and lockfile asks for >= 2.5 (incompatible), force 2.4.22
+            if [ "$RUBY_MAJOR" -lt 3 ]; then
+              case "$BUNDLER_VER" in
+                2.5.*|2.6.*|2.7.*|3.*) BUNDLER_VER="2.4.22" ;;
+              esac
+            fi
+
+            echo "Using Bundler $BUNDLER_VER (Ruby ${RUBY_MAJOR}.${RUBY_MINOR})"
             gem list -i bundler -v "$BUNDLER_VER" >/dev/null || gem install bundler:"$BUNDLER_VER" --no-document
 
             # Install gems into vendor/bundle (project-local)
@@ -125,8 +137,9 @@ pipeline {
               echo "bundle install failed with Bundler ${BUNDLER_VER}"
               exit $RC
             fi
+            echo "bundle install succeeded"
 
-            # CocoaPods via Bundler path
+            # CocoaPods via Bundler (ensures 'pod' is on PATH)
             echo "Running pod install via Bundler…"
             bundle _${BUNDLER_VER}_ exec pod --version
             bundle _${BUNDLER_VER}_ exec pod install --repo-update
