@@ -92,49 +92,53 @@ pipeline {
 			}
 			steps {
 				dir('ios') {
-					sh '''
-            set -euo pipefail
-            export LANG=en_US.UTF-8
-            export LC_ALL=en_US.UTF-8
+					// Ensure Node is on PATH for Podfile's `node` calls
+					withEnv(["PATH+NODE=${tool name: 'node20', type: 'jenkins.plugins.nodejs.tools.NodeJSInstallation'}/bin"]) {
+						sh '''
+              set -euo pipefail
+              export LANG=en_US.UTF-8
+              export LC_ALL=en_US.UTF-8
 
-            echo "Xcode:"
-            which xcodebuild
-            xcodebuild -version || true
+              echo "Xcode:"
+              which xcodebuild
+              xcodebuild -version || true
 
-            echo "Ruby & Gem:"
-            ruby -v
-            gem -v
+              echo "Node on PATH for CocoaPods:"
+              which node || true
+              node -v || true
+              npm -v || true
 
-            # Always install gems to the user dir and expose their bin/ on PATH
-            export GEM_HOME="$HOME/.gem"
-            export GEM_PATH="$GEM_HOME"
-            export PATH="$GEM_HOME/bin:$PATH"
+              echo "Ruby & Gem:"
+              ruby -v
+              gem -v
 
-            # Determine Bundler version: use Gemfile.lock if present, else pick one compatible with Ruby 2.6
-            LOCK_BUNDLER="$(ruby -e 'begin; f="Gemfile.lock"; m=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)); puts(m ? m[1] : ""); rescue; puts ""; end')"
-            if [ -z "$LOCK_BUNDLER" ]; then
-              BUNDLER_VER="2.4.22"   # 2.5+ requires Ruby >= 3.0
-            else
-              BUNDLER_VER="$LOCK_BUNDLER"
-            fi
-            echo "Using Bundler ${BUNDLER_VER}"
+              # Install gems to the user dir and expose their bin/ on PATH
+              export GEM_HOME="$HOME/.gem"
+              export GEM_PATH="$GEM_HOME"
+              export PATH="$GEM_HOME/bin:$PATH"
 
-            # Install Bundler into $GEM_HOME (no sudo/system writes)
-            gem list -i bundler -v "$BUNDLER_VER" >/dev/null 2>&1 || \
-              gem install --user-install bundler:"$BUNDLER_VER" --no-document
+              # Read Bundler version from Gemfile.lock if present; otherwise use one compatible with Ruby 2.6
+              LOCK_BUNDLER="$(ruby -e 'begin; f="Gemfile.lock"; m=/BUNDLED WITH\\n\\s+([0-9.]+)/.match(File.read(f)); puts(m ? m[1] : ""); rescue; puts ""; end')"
+              if [ -z "$LOCK_BUNDLER" ]; then
+                BUNDLER_VER="2.4.22"   # 2.5+ requires Ruby >= 3.0
+              else
+                BUNDLER_VER="$LOCK_BUNDLER"
+              fi
+              echo "Using Bundler ${BUNDLER_VER}"
 
-            hash -r
+              # Use Bundler already available (installed in previous runs) via GEM_HOME bin
+              hash -r
 
-            # Install gems into project-local vendor/bundle and run Pods via Bundler
-            bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
-            bundle _${BUNDLER_VER}_ install --jobs=4
+              # Install gems into project-local vendor/bundle and run Pods via Bundler
+              bundle _${BUNDLER_VER}_ config set --local path 'vendor/bundle'
+              bundle _${BUNDLER_VER}_ install --jobs=4
 
-            # CocoaPods (through Bundler to avoid PATH issues)
-            bundle _${BUNDLER_VER}_ exec pod install --repo-update
+              # CocoaPods via Bundler (so we don't rely on PATH to find 'pod')
+              bundle _${BUNDLER_VER}_ exec pod install --repo-update
 
-            # Ensure exportOptions.plist exists
-            if [ ! -f "$EXPORT_PLIST" ]; then
-              cat > "$EXPORT_PLIST" <<'PLIST'
+              # Ensure exportOptions.plist exists
+              if [ ! -f "$EXPORT_PLIST" ]; then
+                cat > "$EXPORT_PLIST" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -148,19 +152,20 @@ pipeline {
 </dict>
 </plist>
 PLIST
-            fi
+              fi
 
-            # Archive
-            xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
-              -archivePath "$ARCHIVE_PATH" \
-              clean archive
+              # Archive
+              xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration "$CONFIG" \
+                -archivePath "$ARCHIVE_PATH" \
+                clean archive
 
-            # Export IPA
-            xcodebuild -exportArchive \
-              -archivePath "$ARCHIVE_PATH" \
-              -exportOptionsPlist "$EXPORT_PLIST" \
-              -exportPath "$EXPORT_DIR"
-          '''
+              # Export IPA
+              xcodebuild -exportArchive \
+                -archivePath "$ARCHIVE_PATH" \
+                -exportOptionsPlist "$EXPORT_PLIST" \
+                -exportPath "$EXPORT_DIR"
+            '''
+					}
 
 					withCredentials([
 						string(credentialsId: 'ASC_USER',     variable: 'ASC_USER'),
